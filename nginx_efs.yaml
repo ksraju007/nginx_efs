@@ -1,0 +1,295 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  VpcId:
+    Type: 'AWS::EC2::VPC::Id'
+    Description: VpcId of your existing Virtual Private Cloud (VPC)
+    Default: vpc-0c1be0978a76ab666
+  S3BUCKET:
+    Type: String
+    Description: Where to find support scripts and other stuff.
+    Default: cf-dls-tst
+  EMAIL:
+    Type: String
+    Description: Where to send email notifications.
+    Default: whatever@xyz.com
+  SSLARN:
+    Type: String
+    Description: SSL ARN from ACM
+    Default: "ARN from ACM"
+  SERVERCOUNT:
+    Type: Number
+    Description: Min/Max/Desired value will be set to this.
+    Default: 1
+  ENVTYPE:
+    Type: String
+    Default: TEST
+    Description: Enter environment . TEST/PRD.
+    AllowedValues:
+      - TEST
+      - PRD
+  DeployAZs:
+    Type: CommaDelimitedList
+    Default: us-east-1a,us-east-1b
+    Description: The list of AvailabilityZones for your Virtual Private Cloud (VPC)
+  InstanceSubnets:
+    Type: 'List<AWS::EC2::Subnet::Id>'
+    Default: subnet-0a3e7adec1b0151b6,subnet-02e0fe9680b132231
+    Description: Select minimum 2.
+  ELBSubnets:
+    Type: 'List<AWS::EC2::Subnet::Id>'
+    Default: subnet-0ba878a1766390430,subnet-00a85244e47135fe2
+    Description: Select minimum 2.
+  KeyName:
+    Type: 'AWS::EC2::KeyPair::KeyName'
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+    Default: admin_guy
+  AMI:
+    Type: String
+    Default: ami-0b07090b51368abdf
+
+Conditions:
+  isTestEnv : !Equals [ !Ref ENVTYPE, 'TEST']
+  isProdEnv : !Equals [ !Ref ENVTYPE, 'PRD']
+
+Resources:
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+        - Endpoint: !Ref EMAIL
+          Protocol: "email"
+      TopicName: !Sub '${AWS::StackName}-sns'
+
+  EC2TargetGroup80:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 15
+      HealthyThresholdCount: 5
+      HealthCheckPath: "/"
+      Matcher:
+        HttpCode: '200'
+      Name: !Sub '${AWS::StackName}-tg80'
+      Port: 80
+      Protocol: HTTP
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '30'
+      UnhealthyThresholdCount: 3
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-tg80'
+
+  ALBListener80:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+       - Type: "redirect"
+         RedirectConfig:
+           Protocol: "HTTPS"
+           Port: "443"
+           Host: "#{host}"
+           Path: "/#{path}"
+           Query: "#{query}"
+           StatusCode: "HTTP_301"
+      #DefaultActions:
+      #  - Type: forward
+      #    TargetGroupArn:
+      #      Ref: EC2TargetGroup80
+      LoadBalancerArn:
+        Ref: ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+
+  ALBListener443:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn:
+            Ref: EC2TargetGroup80
+      LoadBalancerArn:
+        Ref: ApplicationLoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref SSLARN
+      SslPolicy: ELBSecurityPolicy-TLS-1-2-2017-01
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing # or internal
+      Subnets: !Ref ELBSubnets
+      Name: !Sub '${AWS::StackName}-alb'
+      SecurityGroups:
+        - Ref: ELBInboundSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-alb'
+
+  ELBInboundSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ELB Security Group
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: "-1"
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          FromPort: 80
+          IpProtocol: tcp
+          ToPort: 80
+        - CidrIp: 0.0.0.0/0
+          FromPort: 443
+          IpProtocol: tcp
+          ToPort: 443
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-sg-elb'
+
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow ssh and http from private IP range
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: "-1"
+      SecurityGroupIngress:
+        - CidrIp: 10.0.0.0/8
+          FromPort: 22
+          IpProtocol: tcp
+          ToPort: 22
+        - CidrIp: 10.0.0.0/8
+          FromPort: 80
+          IpProtocol: tcp
+          ToPort: 80
+        - CidrIp: 10.0.0.0/8
+          FromPort: 443
+          IpProtocol: tcp
+          ToPort: 443
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-sg-ec2'
+
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2FullAccess
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+        - Ref: EC2Role
+
+  AutoScalingGroup:
+    Type: 'AWS::AutoScaling::AutoScalingGroup'
+    DependsOn:
+       - EC2SecurityGroup
+       - ApplicationLoadBalancer
+    Properties:
+      AvailabilityZones: !Ref DeployAZs
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}'
+          PropagateAtLaunch: true
+      VPCZoneIdentifier: !Ref InstanceSubnets
+      MinSize: !Ref SERVERCOUNT
+      MaxSize: !Ref SERVERCOUNT
+      DesiredCapacity: !Ref SERVERCOUNT
+      LaunchConfigurationName: !Ref LaunchConfiguration
+      HealthCheckGracePeriod: 180
+      HealthCheckType: EC2
+      Cooldown: "60"
+      TargetGroupARNs:
+        - !Ref EC2TargetGroup80
+  EFS:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: false
+
+  #Trun on and off machines on scheduled time. only for Condition: TESTENV
+  ScheduledActionUp:
+    Type: AWS::AutoScaling::ScheduledAction
+    Condition: isTestEnv
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      MaxSize: 1
+      MinSize: 1
+      DesiredCapacity: 1
+      Recurrence: "0 9 * * *"
+  ScheduledActionDown:
+    Type: AWS::AutoScaling::ScheduledAction
+    Condition: isTestEnv
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      MaxSize: 0
+      MinSize: 0
+      DesiredCapacity: 0
+      Recurrence: "0 22 * * *"
+
+  LaunchConfiguration:
+    Type: 'AWS::AutoScaling::LaunchConfiguration'
+    Properties:
+      ImageId: !Ref AMI
+      AssociatePublicIpAddress: false
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 20
+      IamInstanceProfile: !Ref InstanceProfile
+      KeyName: !Ref KeyName
+      InstanceType: !If [ isProdEnv , "m5a.large", "t3a.medium" ]
+      SecurityGroups:
+        - !Ref EC2SecurityGroup
+      UserData:
+        Fn::Base64:
+          !Sub |
+          #!/bin/bash
+          INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+
+          # Add keys for ops people.
+          mkdir /tmp/publicKeys
+          aws s3 sync s3://${S3BUCKET}/ssh-public-keys/ /tmp/publicKeys/
+          for user in a b c d; do useradd -m -G wheel -s /bin/bash $user ; mkdir /home/$user/.ssh ; chmod 700 /home/$user/.ssh ; chown $user:$user /home/$user/.ssh ; done
+          for user in a b c d; do cp /tmp/publicKeys/$user.pub /home/$user/.ssh/authorized_keys ; chmod 600 /home/$user/.ssh/authorized_keys ; chown $user:$user /home/$user/.ssh/authorized_keys ; done
+
+          #OS packages
+          yum -y install nginx bind-utils
+          chkconfig nginx on
+          echo hello > /var/www/html/index.html
+
+          #Nginx Custome config from s3
+          #aws --region ${AWS::Region} s3 cp s3://${S3BUCKET}/nginx.conf /etc/nginx/conf.d/sites-enabled/
+
+          #EFS Mount, we do this to find internal IP for mount because of direct connect and internal DNS.
+          #on AWS DNS, you dont need this host command etc.
+          mkdir -p  /var/www/html/app/uploads
+          EFSIP=`host ${EFS}.efs.us-east-1.amazonaws.com 169.254.169.253 | grep efs | cut -d " " -f4`
+          NFSOPTS='nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport'
+          mount -t nfs -o $NFSOPTS $EFSIP:/uploads  /var/www/html/uploads
+
+          service nginx start
+
+Outputs:
+  ELBDNS:
+    Description: DNS endpoint of ELB.
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
