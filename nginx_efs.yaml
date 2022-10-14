@@ -63,10 +63,10 @@ Resources:
   EC2TargetGroup80:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      HealthCheckIntervalSeconds: 30
+      HealthCheckIntervalSeconds: 5
       HealthCheckProtocol: HTTP
-      HealthCheckTimeoutSeconds: 15
-      HealthyThresholdCount: 5
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
       HealthCheckPath: "/"
       Matcher:
         HttpCode: '200'
@@ -76,7 +76,7 @@ Resources:
       TargetGroupAttributes:
         - Key: deregistration_delay.timeout_seconds
           Value: '30'
-      UnhealthyThresholdCount: 3
+      UnhealthyThresholdCount: 5
       VpcId: !Ref VpcId
       Tags:
         - Key: Name
